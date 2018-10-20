@@ -1,0 +1,644 @@
+commit ef8ecd921d71754d7d0b8271200a39897f41730e
+Author: sweetmilkcake <sweetmilkcake@outlook.com>
+Date:   Sat Oct 20 04:50:28 2018 -0700
+
+    Add KEY_SPECIFIC_VOLUME Support
+
+diff --git a/android/device/softwinner/petrel-common/sepolicy/file_contexts b/android/device/softwinner/petrel-common/sepolicy/file_contexts
+index 07a6984..5414c04 100755
+--- a/android/device/softwinner/petrel-common/sepolicy/file_contexts
++++ b/android/device/softwinner/petrel-common/sepolicy/file_contexts
+@@ -65,3 +65,4 @@
+ # optee
+ /dev/opteearmtz00           u:object_r:tee_device:s0
+ /system/bin/tee_supplicant  u:object_r:optee_exec:s0
++/system/bin/serial_comm     u:object_r:serial_comm_exec:s0
+diff --git a/android/device/softwinner/petrel-common/sepolicy/serial_comm.te b/android/device/softwinner/petrel-common/sepolicy/serial_comm.te
+new file mode 100644
+index 0000000..fc0caeb
+--- /dev/null
++++ b/android/device/softwinner/petrel-common/sepolicy/serial_comm.te
+@@ -0,0 +1,5 @@
++type serial_comm, domain;
++type serial_comm_exec, exec_type, file_type;
++init_daemon_domain(serial_comm);
++allow serial_comm sysfs:file rw_file_perms;
++
+diff --git a/android/device/softwinner/petrel-p1/device.mk b/android/device/softwinner/petrel-p1/device.mk
+index 6cb1831..9696939 100755
+--- a/android/device/softwinner/petrel-p1/device.mk
++++ b/android/device/softwinner/petrel-p1/device.mk
+@@ -60,6 +60,8 @@ PRODUCT_PACKAGES += \
+ 	libip_loader \
+ 	iploader_server
+ 
++PRODUCT_PACKAGES += serial_comm
++
+ PRODUCT_COPY_FILES += \
+     device/softwinner/petrel-p1/configs/virtual-remote.kl:system/usr/keylayout/virtual-remote.kl \
+     device/softwinner/petrel-p1/configs/sunxi-keyboard.kl:system/usr/keylayout/sunxi-keyboard.kl \
+diff --git a/android/device/softwinner/petrel-p1/init.sun50iw6p1.rc b/android/device/softwinner/petrel-p1/init.sun50iw6p1.rc
+index 6d98d7a..7d99616 100755
+--- a/android/device/softwinner/petrel-p1/init.sun50iw6p1.rc
++++ b/android/device/softwinner/petrel-p1/init.sun50iw6p1.rc
+@@ -113,6 +113,8 @@ on boot
+     write /dev/cpuset/system-background/cpus 0-3
+     write /dev/cpuset/top-app/cpus 0-3
+ 
++    start serial_comm
++
+ on property:sys.shutdown.hdmi=1
+     write /sys/class/hdmi/hdmi/attr/hpd_mask 0x10
+ 
+@@ -288,3 +290,12 @@ service stop_pppoe /system/bin/pppoe-disconnect
+ service optee /system/bin/tee_supplicant
+     class main
+     oneshot
++
++service serial_comm /system/bin/serial_comm
++    class main
++    user root
++    disabled
++    oneshot
++
++on property:persist.sys.specific_volume=*
++    write /sys/kernel/virtual_key 1
+diff --git a/android/frameworks/base/core/java/android/view/KeyEvent.java b/android/frameworks/base/core/java/android/view/KeyEvent.java
+index b003f00..fabce16 100755
+--- a/android/frameworks/base/core/java/android/view/KeyEvent.java
++++ b/android/frameworks/base/core/java/android/view/KeyEvent.java
+@@ -809,6 +809,9 @@ public class KeyEvent extends InputEvent implements Parcelable {
+     public static final int KEYCODE_COPY = 278;
+     /** Key code constant: Paste key. */
+     public static final int KEYCODE_PASTE = 279;
++
++    public static final int KEYCODE_SPECIFIC_VOLUME = 280;
++
+     /** Key code constant: a shortcut key for mouse */
+     public static final int KEYCODE_MOUSE           = 10009;
+     public static final int KEYCODE_TV_SYSTEM       = 10000;
+diff --git a/android/frameworks/base/core/res/res/values/attrs.xml b/android/frameworks/base/core/res/res/values/attrs.xml
+index b61d6cf..4330802 100644
+--- a/android/frameworks/base/core/res/res/values/attrs.xml
++++ b/android/frameworks/base/core/res/res/values/attrs.xml
+@@ -1832,6 +1832,7 @@ i
+         <enum name="KEYCODE_CUT" value="277" />
+         <enum name="KEYCODE_COPY" value="278" />
+         <enum name="KEYCODE_PASTE" value="279" />
++        <enum name="KEYCODE_SPECIFIC_VOLUME" value="280" />
+     </attr>
+ 
+     <!-- ***************************************************************** -->
+diff --git a/android/frameworks/base/data/keyboards/Generic.kl b/android/frameworks/base/data/keyboards/Generic.kl
+index 2a10bdd..ed9e1bd 100644
+--- a/android/frameworks/base/data/keyboards/Generic.kl
++++ b/android/frameworks/base/data/keyboards/Generic.kl
+@@ -247,6 +247,8 @@ key 224   BRIGHTNESS_DOWN
+ key 225   BRIGHTNESS_UP
+ key 226   HEADSETHOOK
+ 
++key 249   SPECIFIC_VOLUME
++
+ key 256   BUTTON_1
+ key 257   BUTTON_2
+ key 258   BUTTON_3
+diff --git a/android/frameworks/base/services/core/java/com/android/server/policy/PhoneWindowManager.java b/android/frameworks/base/services/core/java/com/android/server/policy/PhoneWindowManager.java
+index a4408fc..fbcd7e0 100644
+--- a/android/frameworks/base/services/core/java/com/android/server/policy/PhoneWindowManager.java
++++ b/android/frameworks/base/services/core/java/com/android/server/policy/PhoneWindowManager.java
+@@ -5530,6 +5530,20 @@ public class PhoneWindowManager implements WindowManagerPolicy {
+                 break;
+             }
+ 
++            case KeyEvent.KEYCODE_SPECIFIC_VOLUME: {
++                if (down) {
++                    Log.d(TAG, "KeyEvent.KEYCODE_SPECIFIC_VOLUME down");
++                    AudioManager audioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
++                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC,
++                            Integer.parseInt(SystemProperties.get("persist.sys.specific_volume")),
++                            AudioManager.FLAG_SHOW_UI);
++                    Log.d(TAG, "setStreamVolume " + SystemProperties.get("persist.sys.specific_volume"));
++                } else {
++                    Log.d(TAG, "KeyEvent.KEYCODE_SPECIFIC_VOLUME up");
++                }
++                break;
++            }
++
+             case KeyEvent.KEYCODE_VOLUME_DOWN:
+             case KeyEvent.KEYCODE_VOLUME_UP:
+             case KeyEvent.KEYCODE_VOLUME_MUTE: {
+diff --git a/android/frameworks/native/include/android/keycodes.h b/android/frameworks/native/include/android/keycodes.h
+index 4687b85..9fd76d5 100755
+--- a/android/frameworks/native/include/android/keycodes.h
++++ b/android/frameworks/native/include/android/keycodes.h
+@@ -758,6 +758,9 @@ enum {
+     AKEYCODE_COPY = 278,
+     /** Paste key. */
+     AKEYCODE_PASTE = 279,
++
++    AKEYCODE_SPECIFIC_VOLUME = 280,
++
+     // add for karaok by linjunqian
+     AKEYCODE_MIC_VOLUME_UP   = 370,
+     AKEYCODE_MIC_VOLUME_DOWN = 371,
+diff --git a/android/frameworks/native/include/input/InputEventLabels.h b/android/frameworks/native/include/input/InputEventLabels.h
+index 911c568..78ed509 100755
+--- a/android/frameworks/native/include/input/InputEventLabels.h
++++ b/android/frameworks/native/include/input/InputEventLabels.h
+@@ -319,6 +319,7 @@ static const InputEventLabel KEYCODES[] = {
+     DEFINE_KEYCODE(CUT),
+     DEFINE_KEYCODE(COPY),
+     DEFINE_KEYCODE(PASTE),
++    DEFINE_KEYCODE(SPECIFIC_VOLUME),
+ 	DEFINE_KEYCODE(MIC_VOLUME_UP),
+     DEFINE_KEYCODE(MIC_VOLUME_DOWN),
+     DEFINE_KEYCODE(KOUT_VOLUME_UP),
+diff --git a/android/system/core/serial_comm/Android.mk b/android/system/core/serial_comm/Android.mk
+new file mode 100644
+index 0000000..d7ee151
+--- /dev/null
++++ b/android/system/core/serial_comm/Android.mk
+@@ -0,0 +1,9 @@
++LOCAL_PATH := $(call my-dir)
++
++include $(CLEAR_VARS)
++LOCAL_MODULE := serial_comm
++LOCAL_SRC_FILES := serial_comm.c
++LOCAL_CFLAGS := -Wall -Werror -Wno-unused-parameter
++LOCAL_SHARED_LIBRARIES := \
++    libcutils
++include $(BUILD_EXECUTABLE)
+diff --git a/android/system/core/serial_comm/serial_comm.c b/android/system/core/serial_comm/serial_comm.c
+new file mode 100644
+index 0000000..f40526f
+--- /dev/null
++++ b/android/system/core/serial_comm/serial_comm.c
+@@ -0,0 +1,212 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <stdint.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/ioctl.h>
++#include <errno.h>
++#include <unistd.h>
++#include <termios.h>
++
++#include <linux/ioctl.h>
++
++#include <cutils/properties.h>
++
++// dev control date end
++// 02 01 12 7F
++#define SERIAL_REC_NUM 4
++// VTIME and VMIN is very important.
++// VTIME: Time to wait for data (tenths of seconds)
++#define SERIAL_VTIME 1
++// VMIN: Minimum number of characters to read
++#define SERIAL_VMIN SERIAL_REC_NUM
++
++int serial_set(int fd, int speed, int bits, int event, int stop) {
++    struct termios ttys;
++
++    memset(&ttys, 0, sizeof(ttys));
++
++    // Enable the receiver and set local mode
++    // CLOCAL: Local line - do not change "owner" of port
++    // CREAD: Enable receiver
++    ttys.c_cflag |= (CLOCAL | CREAD);
++
++    // Mask the character size bits
++    // CSIZE: Bit mask for data bits
++    ttys.c_cflag &= ~CSIZE;
++
++    switch (speed) {
++        case 9600:
++            // B9600: 9600 baud
++            cfsetispeed(&ttys, B9600);
++            cfsetospeed(&ttys, B9600);
++            break;
++        case 115200:
++            // B115200: 115,200 baud
++            cfsetispeed(&ttys, B115200);
++            cfsetospeed(&ttys, B115200);
++            break;
++        default:
++            cfsetispeed(&ttys, B115200);
++            cfsetospeed(&ttys, B115200);
++            break;
++    }
++
++    switch (bits) {
++        case 7:
++            // 	7 data bits
++            ttys.c_cflag |= CS7;
++            break;
++        case 8:
++            // 	8 data bits
++            ttys.c_cflag |= CS8;
++            break;
++        default:
++            ttys.c_cflag |= CS8;
++            break;
++    }
++
++    switch (event) {
++        case 'o':
++        case 'O':
++            // PARENB: Enable parity bit
++            ttys.c_cflag |= PARENB;
++            // INPCK: Enable parity check
++            // ISTRIP: Strip parity bits
++            ttys.c_cflag |= (INPCK | ISTRIP);
++            // PARODD: Use odd parity instead of even
++            ttys.c_cflag |= PARODD;
++            break;
++        case 'e':
++        case 'E':
++            ttys.c_cflag |= PARENB;
++            ttys.c_cflag |= (INPCK | ISTRIP);
++            ttys.c_cflag &= ~PARODD;
++            break;
++        case 'n':
++        case 'N':
++            ttys.c_cflag &= ~PARENB;
++            break;
++        default:
++            ttys.c_cflag &= ~PARENB;
++            break;
++    }
++
++    switch (stop) {
++        case 1:
++            // CSTOPB: 	2 stop bits (1 otherwise)
++            ttys.c_cflag &= ~CSTOPB;
++            break;
++        case 2:
++            ttys.c_cflag |= CSTOPB;
++            break;
++        default:
++            ttys.c_cflag &= ~CSTOPB;
++            break;
++    }
++
++    // VTIME: Time to wait for data (tenths of seconds)
++    ttys.c_cc[VTIME] = SERIAL_VTIME;
++    // VMIN: Minimum number of characters to read
++    ttys.c_cc[VMIN] = SERIAL_VMIN;
++
++    // Hardware flow control using the CTS (Clear To Send) and RTS (Request To Send) signal lines
++    // CNEW_RTSCTS, CRTSCTS: Enable hardware flow control (not supported on all platforms)
++    // CNEW_RTSCTS: Also called CRTSCTS
++    //ttys.c_cflag |= CRTSCTS; // Enable hardware flow control
++    ttys.c_cflag &= ~CRTSCTS; // Disable hardware flow control
++
++    // Choosing Canonical Input
++    // Canonical input is line-oriented. Input characters are put into a buffer
++    // which can be edited interactively by the user until a CR (carriage return)
++    // or LF (line feed) character is received.
++    // When selecting this mode you normally select the ICANON, ECHO, and ECHOE options
++    //ttys.c_lflag |= (ICANON | ECHO | ECHOE);
++
++    // Choosing Raw Input
++    // Raw input is unprocessed. Input characters are passed through exactly as they are received,
++    // when they are received. Generally you'll deselect the ICANON, ECHO, ECHOE, and ISIG options when using raw input
++    ttys.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
++
++    // OPOST: Postprocess output (not set = raw output)
++    //ttys.c_oflag |= OPOST; // Choosing Processed Output
++    ttys.c_oflag &= ~OPOST; // Choosing Raw Output
++
++
++    // Flushes the input and/or output queue.
++    // TCIFLUSH: flushes data received but not read.
++    // TCOFLUSH: flushes data written but not transmitted.
++    // TCIOFLUSH: flushes both data received but not read, and data written but not transmitted.
++    tcflush(fd, TCIOFLUSH);
++
++    // Sets the serial port settings immediately.
++    // TCSANOW: Make changes now without waiting for data to complete
++    // TCSADRAIN: Wait until everything has been transmitted
++    // TCSAFLUSH: Flush input and output buffers and make the change
++    if (tcsetattr(fd, TCSANOW, &ttys) != 0) {
++        perror("serial set fail!\n");
++        return -2;
++    }
++
++    return 0;
++}
++
++int is_data_valid(unsigned char *buf) {
++    if (buf[3] != 0x7f) {
++        fprintf(stderr, "%s, data is not valid!\n", __FUNCTION__);
++        return -1;
++    }
++    return 0;
++}
++
++int main(int argc, char *argv[]) {
++    int fd = 0;
++    int ret = 0;
++    int n = 0;
++    unsigned char buf[SERIAL_REC_NUM];
++    char str[10];
++
++    printf("serial test start.\n");
++
++    fd = open("/dev/ttyS3", O_RDWR | O_NOCTTY);
++    if (fd < 0) {
++        fprintf(stderr, "%s, open serial failed!\n", __FUNCTION__);
++        return -1;
++    }
++
++    // Baud rate: 115200, Data bits: 8, Parity: None, Stop bits: 1
++    ret = serial_set(fd, 115200, 8, 'N', 1);
++    if (ret) {
++        fprintf(stderr, "%s, serial set failed!\n", __FUNCTION__);
++        return -1;
++    }
++
++    while (1) {
++        memset(&buf, 0, sizeof(buf));
++        // blocking here
++        n = read(fd, &buf, SERIAL_REC_NUM);
++        if (n < SERIAL_REC_NUM) {
++            fprintf(stderr, "serial read fail!, n = %d\n", n);
++        } else {
++            printf("buf[0] = 0x%x, buf[1] = 0x%x, buf[2] = 0x%x, buf[3] = 0x%x, \n",
++                   buf[0], buf[1], buf[2], buf[3]);
++
++            if (!is_data_valid(buf)) {
++                // data is ok
++                snprintf(str, 3, "%d", buf[2]);
++                printf("property_set persist.sys.specific_volume = %s\n", str);
++                property_set("persist.sys.specific_volume", str);
++            }
++            //n = write(fd, &buf, SERIAL_REC_NUM);
++            //if (n < SERIAL_REC_NUM) {
++            //    fprintf(stderr, "serial write fail!, n = %d\n", n);
++            //}
++        }
++    }
++
++    close(fd);
++
++    printf("serial test end.\n");
++    return 0;
++}
+diff --git a/lichee/linux-3.10/arch/arm64/configs/sun50iw6p1smp_android_7.x_defconfig b/lichee/linux-3.10/arch/arm64/configs/sun50iw6p1smp_android_7.x_defconfig
+index 6d0ccaa..cc15e9a 100644
+--- a/lichee/linux-3.10/arch/arm64/configs/sun50iw6p1smp_android_7.x_defconfig
++++ b/lichee/linux-3.10/arch/arm64/configs/sun50iw6p1smp_android_7.x_defconfig
+@@ -1287,6 +1287,7 @@ CONFIG_INPUT_EVDEV=y
+ CONFIG_INPUT_KEYRESET=y
+ CONFIG_INPUT_KEYCOMBO=y
+ # CONFIG_INPUT_POWERKEY is not set
++CONFIG_INPUT_VIRTUALKEY=y
+ CONFIG_INPUT_SW_DEVICE=m
+ 
+ #
+diff --git a/lichee/linux-3.10/drivers/input/Kconfig b/lichee/linux-3.10/drivers/input/Kconfig
+index 77a12a9..9c6f668 100755
+--- a/lichee/linux-3.10/drivers/input/Kconfig
++++ b/lichee/linux-3.10/drivers/input/Kconfig
+@@ -205,6 +205,16 @@ config INPUT_POWERKEY
+ 	  To compile this driver as a module,choose M here: the
+ 	  module will be called sunxi-gpiokey.
+ 
++config INPUT_VIRTUALKEY
++        tristate "virtual key"
++        depends on INPUT
++        default n
++        ---help---
++          Say Y here if you want to support go virtual_key;
++
++          To compile this driver as a module,choose M here: the
++          module will be called virtual-key.
++
+ config  INPUT_SW_DEVICE
+        tristate  "i2c device detect support"
+        depends on INPUT && I2C
+diff --git a/lichee/linux-3.10/drivers/input/Makefile b/lichee/linux-3.10/drivers/input/Makefile
+index a7203f0..a66231a 100755
+--- a/lichee/linux-3.10/drivers/input/Makefile
++++ b/lichee/linux-3.10/drivers/input/Makefile
+@@ -18,6 +18,8 @@ obj-$(CONFIG_INPUT_EVDEV)	+= evdev.o
+ obj-$(CONFIG_INPUT_EVBUG)	+= evbug.o
+ 
+ obj-$(CONFIG_INPUT_POWERKEY)    += sunxi-gpiokey.o
++obj-$(CONFIG_INPUT_VIRTUALKEY)  += virtual-key.o
++obj-$(CONFIG_INPUT_VIRTUALKEY)  += virtual-key-dev.o
+ 
+ obj-$(CONFIG_INPUT_KEYBOARD)	+= keyboard/
+ obj-$(CONFIG_INPUT_MOUSE)	+= mouse/
+diff --git a/lichee/linux-3.10/drivers/input/virtual-key-dev.c b/lichee/linux-3.10/drivers/input/virtual-key-dev.c
+new file mode 100644
+index 0000000..60c8038
+--- /dev/null
++++ b/lichee/linux-3.10/drivers/input/virtual-key-dev.c
+@@ -0,0 +1,34 @@
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/platform_device.h>
++#include <linux/module.h>
++
++static struct platform_device virtual_key_dev = {
++	.name = "virtual_key",
++	.id = -1,
++};
++
++static int __init virtual_key_dev_init(void)
++{
++	printk("%s-%d: enter\n", __FUNCTION__, __LINE__);
++	if (platform_device_register(&virtual_key_dev)) {
++		pr_err("virtual_key virtual_key_dev_init  fail\n");
++		return -1;
++	}
++
++	return 0;
++}
++
++static void __exit virtual_key_dev_exit(void)
++{
++	platform_device_unregister(&virtual_key_dev);
++}
++
++module_init(virtual_key_dev_init);
++module_exit(virtual_key_dev_exit);
++
++MODULE_AUTHOR("sweetmilkcake <sweetmilkcake@outlook.com>");
++MODULE_DESCRIPTION("virtual key dev");
++MODULE_LICENSE("GPL");
++
++
+diff --git a/lichee/linux-3.10/drivers/input/virtual-key.c b/lichee/linux-3.10/drivers/input/virtual-key.c
+new file mode 100644
+index 0000000..0b951d2
+--- /dev/null
++++ b/lichee/linux-3.10/drivers/input/virtual-key.c
+@@ -0,0 +1,151 @@
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/input.h>
++#include <linux/delay.h>
++#include <linux/slab.h>
++#include <linux/interrupt.h>
++#include <linux/keyboard.h>
++#include <linux/ioport.h>
++#include <linux/timer.h>
++#include <linux/clk.h>
++#include <linux/sys_config.h>
++#include <linux/sys_config.h>
++#include <linux/platform_device.h>
++#include <linux/power/scenelock.h>
++
++static volatile u32 virtual_key_trigger;
++static struct mutex virtual_key_mutex;
++static struct input_dev *virtual_key_dev;
++
++static ssize_t virtual_key_show(struct kobject *kobj,
++				struct kobj_attribute *attr,
++				char *buf)
++{
++	return sprintf(buf, "%d\n", virtual_key_trigger);
++}
++
++static ssize_t virtual_key_store(struct kobject *kobj,
++				struct kobj_attribute *attr,
++				const char *buf, size_t count)
++{
++	int ret = 0;
++
++	mutex_lock(&virtual_key_mutex);
++
++	switch (buf[0]) {
++	case '0':
++		virtual_key_trigger = 0;
++		break;
++	case '1':
++		virtual_key_trigger = 1;
++		input_report_key(virtual_key_dev, KEY_SPECIFIC_VOLUME, 1);
++		input_sync(virtual_key_dev);
++		input_report_key(virtual_key_dev, KEY_SPECIFIC_VOLUME, 0);
++		input_sync(virtual_key_dev);
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++
++	mutex_unlock(&virtual_key_mutex);
++	return ret < 0 ? ret : count;
++}
++
++static struct kobj_attribute virtual_key_attr = __ATTR(virtual_key,
++						0666, virtual_key_show,
++						virtual_key_store);
++
++static int  virtual_key_probe(struct platform_device *pdev)
++{
++	int err = 0;
++
++	printk("%s-%d: enter\n", __FUNCTION__, __LINE__);
++
++	virtual_key_dev = input_allocate_device();
++	if (!virtual_key_dev) {
++		pr_err("virtual_key: not enough memory for input device\n");
++		err = -ENOMEM;
++		goto fail1;
++	}
++
++	virtual_key_dev->name = "virtual_key";
++	//virtual_key_dev->phys = "sunxikbd/input0";
++	virtual_key_dev->id.bustype = BUS_HOST;
++	virtual_key_dev->id.vendor = 0x0001;
++	virtual_key_dev->id.product = 0x0001;
++	virtual_key_dev->id.version = 0x0100;
++
++#ifdef REPORT_REPEAT_KEY_BY_INPUT_CORE
++	virtual_key_dev->evbit[0] = BIT_MASK(EV_KEY)|BIT_MASK(EV_REP);
++	printk(KERN_DEBUG "REPORT_REPEAT_KEY_BY_INPUT_CORE is defined, support report repeat key value. \n");
++#else
++	virtual_key_dev->evbit[0] = BIT_MASK(EV_KEY);
++#endif
++	set_bit(KEY_SPECIFIC_VOLUME, virtual_key_dev->keybit);
++	mutex_init(&virtual_key_mutex);
++
++	err = input_register_device(virtual_key_dev);
++	if (err)
++		goto fail2;
++
++	err = sysfs_create_file(kernel_kobj, &virtual_key_attr.attr);
++	if (err) {
++		printk(KERN_ERR "virtual_key: unable to create sysfs file"
++			" virtual_key (%d)\n", err);
++		goto fail3;
++	}
++
++	return 0;
++
++fail3:
++	input_unregister_device(virtual_key_dev);
++fail2:
++	input_free_device(virtual_key_dev);
++fail1:
++	printk(KERN_DEBUG "virtual_key_init failed. \n");
++
++	return err;
++}
++
++static int virtual_key_remove(struct platform_device *dev)
++{
++
++	input_unregister_device(virtual_key_dev);
++
++	return 0;
++}
++
++static struct platform_driver virtual_key_driver = {
++	.probe = virtual_key_probe,
++	.remove = virtual_key_remove,
++	.driver = {
++		.name  = "virtual_key",
++		.owner = THIS_MODULE,
++	},
++};
++
++static int __init virtual_key_init(void)
++{
++	printk("%s-%d: enter\n", __FUNCTION__, __LINE__);
++	if (platform_driver_register(&virtual_key_driver)) {
++		pr_err("virtual_key platform_driver_register  fail\n");
++		return -1;
++	}
++
++	return 0;
++}
++
++static void __exit virtual_key_exit(void)
++{
++	platform_driver_unregister(&virtual_key_driver);
++}
++
++module_init(virtual_key_init);
++module_exit(virtual_key_exit);
++
++MODULE_AUTHOR("sweetmilkcake <sweetmilkcake@outlook.com>");
++MODULE_DESCRIPTION("virtual key driver");
++MODULE_LICENSE("GPL");
++
++
+diff --git a/lichee/linux-3.10/include/uapi/linux/input.h b/lichee/linux-3.10/include/uapi/linux/input.h
+index 74b5a00..5413c97 100644
+--- a/lichee/linux-3.10/include/uapi/linux/input.h
++++ b/lichee/linux-3.10/include/uapi/linux/input.h
+@@ -473,6 +473,8 @@ struct input_keymap_entry {
+ 
+ #define KEY_MICMUTE		248	/* Mute / unmute the microphone */
+ 
++#define KEY_SPECIFIC_VOLUME	249
++
+ #define KEY_VOICE_ASSIST 582
+ /* Code 255 is reserved for special needs of AT keyboard driver */
+ 
